@@ -61,16 +61,20 @@ func deployment_data(binary_path string, workspaces []string) [][]string {
 			return nil
 		}
 
-		for _, child := range data["values"].(map[string]interface{})["root_module"].(map[string]interface{})["child_modules"].([]interface{})[1].(map[string]interface{})["child_modules"].([]interface{})[0].(map[string]interface{})["child_modules"].([]interface{}) {
-			for _, resource := range child.(map[string]interface{})["resources"].([]interface{}) {
-				if values, ok := resource.(map[string]interface{})["values"].(map[string]interface{}); ok {
-					if clone, ok := values["clone"].([]interface{}); ok && len(clone) > 0 {
-						if customize, ok := clone[0].(map[string]interface{})["customize"].([]interface{}); ok && len(customize) > 0 {
-							if linuxOptions, ok := customize[0].(map[string]interface{})["linux_options"].([]interface{}); ok && len(linuxOptions) > 0 {
-								if hostName, ok := linuxOptions[0].(map[string]interface{})["host_name"].(string); ok {
-									if networkInterface, ok := customize[0].(map[string]interface{})["network_interface"].([]interface{}); ok && len(networkInterface) > 0 {
-										if ipv4Address, ok := networkInterface[0].(map[string]interface{})["ipv4_address"].(string); ok {
-											machines = append(machines, []string{workspace, hostName, ipv4Address})
+		if len(data) == 1 {
+			machines = append(machines, []string{workspace, "", ""})
+		} else {
+			for _, child := range data["values"].(map[string]interface{})["root_module"].(map[string]interface{})["child_modules"].([]interface{})[1].(map[string]interface{})["child_modules"].([]interface{})[0].(map[string]interface{})["child_modules"].([]interface{}) {
+				for _, resource := range child.(map[string]interface{})["resources"].([]interface{}) {
+					if values, ok := resource.(map[string]interface{})["values"].(map[string]interface{}); ok {
+						if clone, ok := values["clone"].([]interface{}); ok && len(clone) > 0 {
+							if customize, ok := clone[0].(map[string]interface{})["customize"].([]interface{}); ok && len(customize) > 0 {
+								if linuxOptions, ok := customize[0].(map[string]interface{})["linux_options"].([]interface{}); ok && len(linuxOptions) > 0 {
+									if hostName, ok := linuxOptions[0].(map[string]interface{})["host_name"].(string); ok {
+										if networkInterface, ok := customize[0].(map[string]interface{})["network_interface"].([]interface{}); ok && len(networkInterface) > 0 {
+											if ipv4Address, ok := networkInterface[0].(map[string]interface{})["ipv4_address"].(string); ok {
+												machines = append(machines, []string{workspace, hostName, ipv4Address})
+											}
 										}
 									}
 								}
