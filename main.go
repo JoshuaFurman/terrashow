@@ -10,6 +10,8 @@ import (
 	"github.com/olekukonko/tablewriter"
 )
 
+var CURRENT_WORKSPACE string
+
 func get_workspaces(binary_path string) []string {
 	// Execute terraform command for getting all workspaces
 	cmd := exec.Command(string(binary_path), "workspace", "list")
@@ -25,6 +27,7 @@ func get_workspaces(binary_path string) []string {
 	var workspaces []string
 	for _, line := range lines {
 		if strings.Contains(line, "*") {
+			CURRENT_WORKSPACE = line
 			line = strings.ReplaceAll(line, "*", "")
 		}
 		line = strings.TrimSpace(line)
@@ -45,6 +48,10 @@ func deployment_data(binary_path string, workspaces []string) [][]string {
 		// Change workspace
 		workspace_cmd := exec.Command(string(binary_path), "workspace", "select", workspace)
 		_, err := workspace_cmd.Output()
+		if err != nil {
+			fmt.Println(err.Error())
+			return nil
+		}
 
 		output_cmd := exec.Command(string(binary_path), "show", "-json")
 		stdout, err := output_cmd.Output()
@@ -73,7 +80,11 @@ func deployment_data(binary_path string, workspaces []string) [][]string {
 									if hostName, ok := linuxOptions[0].(map[string]interface{})["host_name"].(string); ok {
 										if networkInterface, ok := customize[0].(map[string]interface{})["network_interface"].([]interface{}); ok && len(networkInterface) > 0 {
 											if ipv4Address, ok := networkInterface[0].(map[string]interface{})["ipv4_address"].(string); ok {
-												machines = append(machines, []string{workspace, hostName, ipv4Address})
+												if strings.Contains(CURRENT_WORKSPACE, workspace) {
+													machines = append(machines, []string{CURRENT_WORKSPACE, hostName, ipv4Address})
+												} else {
+													machines = append(machines, []string{workspace, hostName, ipv4Address})
+												}
 											}
 										}
 									}
@@ -123,4 +134,14 @@ func main() {
 
 	table.Render()
 
+	// Return to current workspace
+	current_workspace := strings.ReplaceAll(CURRENT_WORKSPACE, "*", "")
+	current_workspace = strings.ReplaceAll(current_workspace, " ", "")
+
+	return_cmd := exec.Command(string(terraform_binary_path), "workspace", "select", current_workspace)
+	_, err := return_cmd.Output()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 }
