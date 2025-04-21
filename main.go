@@ -3,145 +3,197 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
-	"os/exec"
 	"strings"
 
 	"github.com/olekukonko/tablewriter"
 )
 
-var CURRENT_WORKSPACE string
-
-func get_workspaces(binary_path string) []string {
-	// Execute terraform command for getting all workspaces
-	cmd := exec.Command(string(binary_path), "workspace", "list")
-	stdout, err := cmd.Output()
-	if err != nil {
-		fmt.Println(err.Error())
-		return nil
-	}
-
-	lines := strings.Split(string(stdout), "\n")
-
-	// Remove the * character, strip whitespace from the lines, and skip blank lines.
-	var workspaces []string
-	for _, line := range lines {
-		if strings.Contains(line, "*") {
-			CURRENT_WORKSPACE = line
-			line = strings.ReplaceAll(line, "*", "")
-		}
-		line = strings.TrimSpace(line)
-		if line != "" {
-			workspaces = append(workspaces, line)
-		}
-	}
-
-	// Return list of workspaces
-	return workspaces
+// Define structs to match the JSON structure
+type TerraformState struct {
+	Resources []Resource `json:"resources"`
 }
 
-func deployment_data(binary_path string, workspaces []string) [][]string {
-	// Store workspace, hostname and IP
-	var machines [][]string
+type Resource struct {
+	Instances []Instance `json:"instances"`
+}
 
-	for _, workspace := range workspaces {
-		// Change workspace
-		workspace_cmd := exec.Command(string(binary_path), "workspace", "select", workspace)
-		_, err := workspace_cmd.Output()
-		if err != nil {
-			fmt.Println(err.Error())
-			return nil
-		}
+type Instance struct {
+	Attributes VMAttributes `json:"attributes"`
+}
 
-		output_cmd := exec.Command(string(binary_path), "show", "-json")
-		stdout, err := output_cmd.Output()
-		if err != nil {
-			fmt.Println(err.Error())
-			return nil
-		}
+type VMAttributes struct {
+	Clone []Clone `json:"clone"`
+}
 
-		// Parse the JSON
-		var data map[string]interface{}
-		err = json.Unmarshal(stdout, &data)
-		if err != nil {
-			fmt.Println(err)
-			return nil
-		}
+type Clone struct {
+	Customize []Customize `json:"customize"`
+}
 
-		if len(data) == 1 {
-			machines = append(machines, []string{workspace, "", ""})
+type Customize struct {
+	LinuxOptions     []LinuxOptions     `json:"linux_options"`
+	NetworkInterface []NetworkInterface `json:"network_interface"`
+}
+
+type LinuxOptions struct {
+	HostName string `json:"host_name"`
+}
+
+type NetworkInterface struct {
+	IPv4Address string `json:"ipv4_address"`
+	IPv6Address string `json:"ipv6_address"`
+}
+
+// VMData holds the combined information of a VM
+type VMData struct {
+	HostName    string
+	IPv4Address string
+	IPv6Address string
+}
+
+// TODO:
+// - Figure out the ordering in the table...
+
+func main() {
+	full_data := make(map[string][]VMData)
+	var wrkspace_buffer string
+	var state_location string
+
+	workspaces, err := getWorkspaces()
+	if err != nil {
+		fmt.Println("No workspace for:", err)
+	}
+
+	for _, wrkspace := range workspaces {
+		if wrkspace == "default" || wrkspace == "* default" {
+			vmData, err := parseTerraformState("terraform.tfstate")
+			if err != nil {
+				fmt.Println("Error parsing file:", err)
+				continue
+			}
+
+			full_data[wrkspace] = vmData
 		} else {
-			for _, child := range data["values"].(map[string]interface{})["root_module"].(map[string]interface{})["child_modules"].([]interface{})[1].(map[string]interface{})["child_modules"].([]interface{})[0].(map[string]interface{})["child_modules"].([]interface{}) {
-				for _, resource := range child.(map[string]interface{})["resources"].([]interface{}) {
-					if values, ok := resource.(map[string]interface{})["values"].(map[string]interface{}); ok {
-						if clone, ok := values["clone"].([]interface{}); ok && len(clone) > 0 {
-							if customize, ok := clone[0].(map[string]interface{})["customize"].([]interface{}); ok && len(customize) > 0 {
-								if linuxOptions, ok := customize[0].(map[string]interface{})["linux_options"].([]interface{}); ok && len(linuxOptions) > 0 {
-									if hostName, ok := linuxOptions[0].(map[string]interface{})["host_name"].(string); ok {
-										if networkInterface, ok := customize[0].(map[string]interface{})["network_interface"].([]interface{}); ok && len(networkInterface) > 0 {
-											if ipv4Address, ok := networkInterface[0].(map[string]interface{})["ipv4_address"].(string); ok {
-												if strings.Contains(CURRENT_WORKSPACE, workspace) {
-													machines = append(machines, []string{CURRENT_WORKSPACE, hostName, ipv4Address})
-												} else {
-													machines = append(machines, []string{workspace, hostName, ipv4Address})
-												}
-											}
-										}
-									}
-								}
-							}
+			if strings.Contains(wrkspace, "* ") {
+				wrkspace_buffer = strings.TrimLeft(wrkspace, "* ")
+				state_location = "terraform.tfstate.d/" + wrkspace_buffer + "/terraform.tfstate"
+			} else {
+				state_location = "terraform.tfstate.d/" + wrkspace + "/terraform.tfstate"
+			}
+			vmData, err := parseTerraformState(state_location)
+			if err != nil {
+				fmt.Println("Error parsing file:", err)
+				continue
+			}
+
+			full_data[wrkspace] = vmData
+		}
+	}
+
+	// Build table for data
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Workspace", "HostName", "IPv4 Address", "IPv6 Address"})
+	table.SetAutoMergeCells(true)
+	table.SetRowLine(true)
+
+	// for k, v := range full_data {
+	// 	if len(v) == 0 {
+	// 		row := []string{k, "", "", ""}
+	// 		table.Append(row)
+	// 	}
+	// 	for _, info := range v {
+	// 		row := []string{k, info.HostName, info.IPv4Address, info.IPv6Address}
+	// 		table.Append(row)
+	// 	}
+	// }
+
+	for _, k := range workspaces {
+		if len(full_data[k]) == 0 {
+			row := []string{k, "", "", ""}
+			table.Append(row)
+		}
+		for _, info := range full_data[k] {
+			row := []string{k, info.HostName, info.IPv4Address, info.IPv6Address}
+			table.Append(row)
+		}
+	}
+	table.Render()
+}
+
+func parseTerraformState(filename string) ([]VMData, error) {
+	file, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+
+	var state TerraformState
+	err = json.Unmarshal(file, &state)
+	if err != nil {
+		return nil, err
+	}
+
+	var vms []VMData
+	for _, resource := range state.Resources {
+		for _, instance := range resource.Instances {
+			for _, clone := range instance.Attributes.Clone {
+				for _, customize := range clone.Customize {
+					if len(customize.LinuxOptions) > 0 && len(customize.NetworkInterface) > 0 {
+						vm := VMData{
+							HostName:    customize.LinuxOptions[0].HostName,
+							IPv4Address: customize.NetworkInterface[0].IPv4Address,
+							IPv6Address: customize.NetworkInterface[0].IPv6Address,
 						}
+						vms = append(vms, vm)
 					}
 				}
 			}
 		}
 	}
 
-	return machines
+	return vms, nil
 }
 
-func main() {
-
-	// Must set ENV for path to terraform binary
-	terraform_binary_path := os.Getenv("TFB_PATH")
-	if terraform_binary_path == "" {
-		fmt.Println("Must set TFB_PATH Environment variable for path to terraform binary.")
-	}
-
-	// Get all workspaces
-	workspaces := get_workspaces(terraform_binary_path)
-	if workspaces == nil {
-		fmt.Println("Could not get workspaces from terraform.")
-		return
-	}
-
-	// Populate machines data
-	machines := deployment_data(terraform_binary_path, workspaces)
-	if machines == nil {
-		fmt.Println("Something went wrong getting workspace data.")
-		return
-	}
-
-	// Build table for data
-	table := tablewriter.NewWriter(os.Stdout)
-	table.SetHeader([]string{"Workspace", "HostName", "IP Address"})
-	table.SetAutoMergeCells(true)
-	table.SetRowLine(true)
-
-	for _, v := range machines {
-		table.Append(v)
-	}
-
-	table.Render()
-
-	// Return to current workspace
-	current_workspace := strings.ReplaceAll(CURRENT_WORKSPACE, "*", "")
-	current_workspace = strings.ReplaceAll(current_workspace, " ", "")
-
-	return_cmd := exec.Command(string(terraform_binary_path), "workspace", "select", current_workspace)
-	_, err := return_cmd.Output()
+func listSubdirectories(directory string) ([]string, error) {
+	dirEntries, err := ioutil.ReadDir(directory)
 	if err != nil {
-		fmt.Println(err)
-		return
+		return nil, err
 	}
+
+	var subdirectories []string
+	for _, dirEntry := range dirEntries {
+		if dirEntry.IsDir() {
+			subdirectories = append(subdirectories, dirEntry.Name())
+		}
+	}
+
+	return subdirectories, nil
+}
+
+func getWorkspaces() ([]string, error) {
+	var workspaces []string
+	// Get current workspace
+	file, err := ioutil.ReadFile(".terraform/environment")
+	if err != nil {
+		return nil, err
+	}
+	current_workspace := string(file)
+
+	// Get list of all workspaces
+	wrkspace_buffer, err := listSubdirectories("terraform.tfstate.d")
+	if err != nil {
+		return nil, err
+	}
+	wrkspace_buffer = append([]string{"default"}, wrkspace_buffer...)
+
+	for _, wrkspace := range wrkspace_buffer {
+		if wrkspace == current_workspace {
+			current_workspace = "* " + current_workspace
+			workspaces = append(workspaces, current_workspace)
+		} else {
+			workspaces = append(workspaces, wrkspace)
+		}
+	}
+
+	return workspaces, nil
 }
